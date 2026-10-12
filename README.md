@@ -7,9 +7,10 @@ sitting in front of it, and can keep your radio working when airable goes away.
 ## How it works
 
 Your Yamaha streamer fetches its `NET RADIO` station list over HTTPS from `3573112786.airable.io`
-(a per-device airable endpoint), then streams audio directly from each broadcaster.
+(a per-device airable endpoint), then streams audio directly from each broadcaster. Station
+logos come from `static.airable.io` over plain HTTP.
 
-This project points that host at your Pi and does three things:
+This project points those hosts at your Pi and does three things:
 
 1. **Capture** — every request/response is decrypted by your Pi and written verbatim to
    `data/captures/` so we can discover the exact API schema.
@@ -69,14 +70,14 @@ Notes:
   streams (Icecast-compatible). HTTPS streams are not supported by the device either.
 - Stations without an explicit `id` get a stable ID derived from their stream URL, so
   favorites made against your server persist across restarts.
-- `static.airable.io` logo URLs are not reproduced (offline icons are blank); set `images: []`
-  is handled automatically.
+- Stations added offline have no logo (`images: []`) — logos are only shown for real
+  airable favorites, which the `static.airable.io` mirror serves (see below).
 
 ## Requirements
 
 - Raspberry Pi (any 64-bit OS) with a static LAN IP
 - Receiver and Pi on the same reachable network
-- Ports `443/tcp` (required), and optionally `53/udp + 53/tcp` for the built-in DNS
+- Ports `443/tcp` (API) and `80/tcp` (station logos), and optionally `53/udp + 53/tcp` DNS
 - `openssl` installed (usually already present)
 - Docker + docker compose, or Python 3.11+ for running without Docker
 
@@ -90,11 +91,8 @@ cp config.yaml config.local.yaml   # edit if you want the optional DNS server
 
 # 2. create a local CA once, then sign the radio API host cert with it
 ./scripts/gen_ca.sh
-./scripts/gen_cert.sh 3573112786.airable.io
+./scripts/gen_cert.sh 3573112786.airable.io static.airable.io
 
-#    (optional) also mirror station logos:
-# ./scripts/gen_cert.sh static.airable.io
-#    then uncomment the static.airable.io block in config.local.yaml
 #    afterwards, install ssl/ca.crt on your phone (see "Phone / MusicCast app trust")
 
 # 3. run it
@@ -113,15 +111,17 @@ the built-in DNS (leave `dns.enabled: false` if you'll use router CNAMEs instead
 Choose one:
 
 **Option A — CNAME on your local DNS (recommended, you said you can do this):**
-Add a record so `3573112786.airable.io` resolves to your Pi's IP (e.g. a CNAME
-`3573112786.airable.io -> pi.lan`, with `pi.lan -> <pi-ip>`). Nothing else changes —
-`ntp.airable.io`, `static.airable.io`, and all other traffic stay untouched.
+Add records so `3573112786.airable.io` **and** `static.airable.io` resolve to your Pi's IP
+(e.g. CNAMEs to `pi.lan`, with `pi.lan -> <pi-ip>`). Only `ntp.airable.io` and other
+unrelated traffic stay untouched. Because the Pi also uses this DNS, set `upstream_ip` for
+each host (see `config.yaml`) so the proxy still reaches the real airable for relay/capture
+instead of looping back to itself.
 
 **Option B — built-in DNS server:**
 Set `dns.enabled: true` in the config and point the receiver's DNS fields at the Pi
 (Setup → Network → DHCP Off → enter IP/mask/gateway, then DNS (P) and DNS (S) =
 Pi's IP). The built-in DNS logs every query and forwards everything not in `override`
-upstream, so only the airable host is redirected.
+upstream, so only the airable hosts are redirected (both are in the sample `override`).
 
 ## Verify it works
 
@@ -221,6 +221,12 @@ Back up `data/` if you want the fallback cache to persist across reinstalls.
   least once while airable was up.
 - **Port 53 already in use:** `systemd-resolved` on some distros occupies it
   (`sudo systemctl stop systemd-resolved` / mask it) when using the built-in DNS.
+- **`CERTIFICATE_VERIFY_FAILED ... self-signed certificate` and `Cannot connect to
+  host ...airable.io:443`:** the proxy resolved an intercepted hostname back to the Pi
+  itself (a DNS/CNAME loop), so its own upstream fetch hit our cert. Fix: set `upstream_ip`
+  for each host in `config.yaml` to the real IP, which the proxy uses for outbound fetches
+  while ignoring local DNS. Get the real IPs from a public resolver:
+  `nslookup static.airable.io 1.1.1.1` and `nslookup 3573112786.airable.io 1.1.1.1`.
 - **Captures show up but the phone app says "connection error":** the receiver accepted
   the cert but the MusicCast app rejected it (it validates TLS against airable.io). Install
   the local CA on the phone (see "Phone / MusicCast app trust"). The receiver itself keeps
@@ -233,8 +239,9 @@ Back up `data/` if you want the fallback cache to persist across reinstalls.
 
 - Traffic to the radio API host is decrypted by your Pi; keep the Pi trusted and on a
   network you control.
-- This only intercepts the configured hosts (`3573112786.airable.io`, optionally
+- This only intercepts the configured hosts (`3573112786.airable.io` and
   `static.airable.io`). NTP, Yamaha/MusicCast cloud, and broadcasters are untouched.
-- Logos will break when airable dies unless you also mirror `static.airable.io`.
+- Station logos from `static.airable.io` are mirrored and cached on disk (port `80`), so
+  they keep showing even after airable goes away — provided you browsed while it was up.
 - Streaming audio is not proxied — the receiver still connects directly to broadcaster
   stream URLs.

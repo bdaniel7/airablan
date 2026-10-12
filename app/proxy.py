@@ -5,14 +5,18 @@ import json
 import logging
 import os
 import re
+import socket
 import ssl
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 import yaml
 from aiohttp import web
+from aiohttp.abc import AbstractResolver
+from aiohttp.resolver import DefaultResolver
 
 from .cache import ResponseCache
 from .config import load_config
@@ -32,6 +36,33 @@ HOP_HEADERS = {
 }
 
 PLAY_RE = re.compile(r"/airable/play/radio/(\d+)/(\d+)")
+
+
+class _PinnedResolver(AbstractResolver):
+    """Resolve specific hostnames to fixed IPs, so the proxy can reach the real
+    upstream even when local DNS redirects that hostname to this Pi itself."""
+
+    def __init__(self, mapping):
+        self._mapping = dict(mapping)
+        self._fallback = DefaultResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        ip = self._mapping.get(host)
+        if ip:
+            return [
+                {
+                    "hostname": host,
+                    "host": ip,
+                    "port": port,
+                    "family": socket.AF_INET,
+                    "proto": socket.IPPROTO_TCP,
+                    "flags": 0,
+                }
+            ]
+        return await self._fallback.resolve(host, port, family)
+
+    async def close(self):
+        await self._fallback.close()
 
 
 def _try_text(body):
@@ -90,6 +121,15 @@ class ProxyApp:
         self._tls_context = self._build_tls_context()
 
         self.mode = str(config.get("mode", "proxy")).lower()
+        self.mirror_hosts = {
+            name for name, info in self.hosts.items() if info.get("mirrored")
+        }
+        self.upstream_pins = {}
+        for info in self.hosts.values():
+            ip = info.get("upstream_ip")
+            host = urlsplit(info["upstream"]).hostname
+            if ip and host:
+                self.upstream_pins[host] = ip
         self.offline = None
         if self.mode == "offline":
             from .offline import OfflineServer
@@ -106,19 +146,30 @@ class ProxyApp:
 
     def _build_tls_context(self):
         contexts = {}
+        default_cert = None
         for name, info in self.hosts.items():
+            cert_path = self._resolve(info["cert"])
+            key_path = self._resolve(info["key"])
+            if not (Path(cert_path).exists() and Path(key_path).exists()):
+                log.warning(
+                    "cert missing for %s (%s) - that host is not served over TLS",
+                    name,
+                    cert_path,
+                )
+                continue
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(
-                certfile=self._resolve(info["cert"]), keyfile=self._resolve(info["key"])
-            )
+            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
             contexts[name] = ctx
+            if default_cert is None:
+                default_cert = (cert_path, key_path)
 
-        default_info = next(iter(self.hosts.items()))[1]
+        if default_cert is None:
+            raise RuntimeError(
+                "no TLS certificates found; run scripts/gen_cert.sh <hostname> first"
+            )
+
         master = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        master.load_cert_chain(
-            certfile=self._resolve(default_info["cert"]),
-            keyfile=self._resolve(default_info["key"]),
-        )
+        master.load_cert_chain(certfile=default_cert[0], keyfile=default_cert[1])
 
         def sni_callback(sslobj, servername, sslctx):
             if servername and servername in contexts:
@@ -135,7 +186,7 @@ class ProxyApp:
         req_headers = dict(request.headers.items())
         req_body = await request.read()
 
-        if self.mode == "offline":
+        if self.mode == "offline" and host not in self.mirror_hosts:
             status, payload = self.offline.route(host, method, path)
             log.info("offline %s %s -> %s", method, path, status)
             body = json.dumps(payload, separators=(",", ":"))
@@ -302,7 +353,12 @@ class ProxyApp:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(self._exception_handler)
 
-        connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
+        connector = aiohttp.TCPConnector(
+            ssl=self.verify_ssl,
+            resolver=(
+                _PinnedResolver(self.upstream_pins) if self.upstream_pins else None
+            ),
+        )
         self.client = aiohttp.ClientSession(connector=connector, timeout=self.timeout)
 
         app = web.Application()
@@ -316,6 +372,15 @@ class ProxyApp:
         site = web.TCPSite(runner, host, port, ssl_context=self._tls_context)
         await site.start()
         log.info("proxy listening on https://%s:%s", host, port)
+
+        http_cfg = self.config.get("listen_http", {}) or {}
+        http_site = None
+        if http_cfg.get("host"):
+            http_host = http_cfg.get("host", "0.0.0.0")
+            http_port = int(http_cfg.get("port", 80))
+            http_site = web.TCPSite(runner, http_host, http_port)
+            await http_site.start()
+            log.info("proxy listening on http://%s:%s", http_host, http_port)
 
         ui_runners = []
         ui_cfg = self.config.get("ui", {}) or {}
@@ -332,17 +397,32 @@ class ProxyApp:
             log.info("station UI listening on http://%s:%s", ui_host, ui_port)
 
         try:
+            self._shutdown = asyncio.Event()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, self._shutdown.set)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass
+
             if run_dns:
                 from .dns import DnsProxy
 
                 dns_cfg = self.config.get("dns", {}) or {}
                 dns = DnsProxy(dns_cfg, self.config["data_dir"])
-                await asyncio.gather(dns.serve(), asyncio.Event().wait())
+                dns_task = asyncio.create_task(dns.serve())
+                await self._shutdown.wait()
+                dns_task.cancel()
+                try:
+                    await dns_task
+                except asyncio.CancelledError:
+                    pass
             else:
-                await asyncio.Event().wait()
+                await self._shutdown.wait()
         finally:
-            for runner in ui_runners:
-                await runner.cleanup()
+            log.info("shutting down")
+            for ui_runner in ui_runners:
+                await ui_runner.cleanup()
+            await runner.cleanup()
             await self.client.close()
 
 

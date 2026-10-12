@@ -212,6 +212,39 @@ path is relative to `data_dir`, so `stations_seen.yaml` → `data/stations_seen.
 
 Back up `data/` if you want the fallback cache to persist across reinstalls.
 
+## Run as a service (systemd)
+
+So the API starts on boot and restarts on failure:
+
+```bash
+cd airable-api
+sudo ./scripts/install_service.sh
+```
+
+The script writes `/etc/systemd/system/airable-api.service`, enables it, and starts it. It
+runs the app from this directory's `.venv` as the user who invoked `sudo`, and grants
+`CAP_NET_BIND_SERVICE` so ports 443/80 bind without running as root. Override defaults if
+needed:
+
+```bash
+sudo APP_DIR=/var/opt/airable SERVICE_USER=airable ./scripts/install_service.sh
+```
+
+Manage it with:
+
+```bash
+systemctl status airable-api         # is it running?
+journalctl -u airable-api -f         # live logs
+sudo systemctl restart airable-api   # after editing config.yaml / stations.yaml
+sudo systemctl stop airable-api
+```
+
+`config.yaml`, `stations.yaml` and `ssl/` are resolved relative to the working directory
+(the repo root), so keep them alongside the code. Re-run `install_service.sh` after moving
+the repo or recreating the venv. If the service exits with a port-permission error, remove
+the `AmbientCapabilities` lines (that user then needs root or `setcap`), and if it can't
+write `data/`, adjust `ReadWritePaths`.
+
 ## Troubleshooting
 
 - **Empty list after switching DNS:** power-cycle the receiver off at the mains for 1–2

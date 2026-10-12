@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import signal
 import socket
 import ssl
 import time

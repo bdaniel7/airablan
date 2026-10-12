@@ -1,0 +1,51 @@
+debug: false
+
+mode: proxy
+
+stations_file: stations.yaml
+
+ui:
+  enabled: true
+  host: "0.0.0.0"
+  port: 9080
+
+listen:
+  host: "0.0.0.0"
+  port: 443
+
+hosts:
+  3573112786.airable.io:
+    upstream: "https://3573112786.airable.io"
+    cert: "ssl/3573112786.airable.io.crt"
+    key: "ssl/3573112786.airable.io.key"
+  # static.airable.io:
+  #   upstream: "https://static.airable.io"
+  #   cert: "ssl/static.airable.io.crt"
+  #   key: "ssl/static.airable.io.key"
+
+upstream:
+  timeout_seconds: 30
+  verify_ssl: true
+
+cache:
+  enabled: true
+  ttl_days: 365
+  stale_on_error: true
+
+capture:
+  enabled: true
+
+stations_log:
+  enabled: true
+  file: "stations_seen.yaml"   # relative to data_dir
+
+dns:
+  enabled: false
+  host: "0.0.0.0"
+  port: 53
+  upstream: "1.1.1.1"
+  upstream_port: 53
+  override:
+    "3573112786.airable.io": "10.0.0.101"
+
+data_dir: "data"

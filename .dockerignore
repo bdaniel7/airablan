@@ -1,0 +1,6 @@
+.git
+data
+ssl
+__pycache__
+*.py[cod]
+.venv

@@ -1,0 +1,12 @@
+My Favorites:
+  Magic FM:
+    url: http://live.magicfm.ro/magicfm.aacp
+    id: '8209371091797949'
+    codec: AAC
+    bitrate: 80
+  Radio Cafe Romania:
+    url: http://live.radiocafe.ro:8048/live.aac
+    id: '8477138599380852'
+    codec: AAC
+    bitrate: 64
+My Stations:
